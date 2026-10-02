@@ -1,5 +1,5 @@
 import { MODULE_BY_KEY } from '@/data/modules'
-import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import { allRows, listRows, resetRows, transactRows } from '@/data/local-store'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
@@ -28,32 +28,52 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
   return { items: matched, total: matched.length, page: 1, size: matched.length }
 }
 
+// 和种子里日期字段同一个格式：本地时区的 YYYY-MM-DD。
+function todayText(): string {
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${month}-${day}`
+}
+
 export function runAction(key: string, id: number, action: string): ActionResult {
   const meta = moduleMeta(key)
   const target = meta.actionTargets[action]
   if (!target) {
     return { ok: false, message: `${meta.entity}没有登记「${action}」这个动作` }
   }
-  const rows = listRows(key)
-  const index = rows.findIndex((row) => Number(row.id) === id)
-  if (index < 0) {
-    return { ok: false, message: `没有找到编号为 ${id} 的${meta.entity}` }
-  }
-  const current = String(rows[index].status)
-  if (current === target) {
-    return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
-  }
   const lastStatus = meta.statuses[meta.statuses.length - 1]
-  const updated: EntryRow = {
-    ...rows[index],
-    status: target,
-    pending: target !== lastStatus,
-    abnormal: NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb)),
+  const effects = meta.actionEffects?.[action] ?? {}
+  try {
+    return transactRows<ActionResult>(key, (rows) => {
+      const index = rows.findIndex((row) => Number(row.id) === id)
+      if (index < 0) {
+        return { rows: null, result: { ok: false, message: `没有找到编号为 ${id} 的${meta.entity}` } }
+      }
+      const current = String(rows[index].status)
+      if (current === target) {
+        // 幂等：两个班组并发点同一个动作，后到的一律不落库。
+        return { rows: null, result: { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` } }
+      }
+      const fieldUpdates: Record<string, string> = {}
+      for (const [field, value] of Object.entries(effects)) {
+        fieldUpdates[field] = value === '$today' ? todayText() : value
+      }
+      // 状态、业务字段、待办标记拼进同一条记录一次落库，不存在写了一半的中间态。
+      const updated: EntryRow = {
+        ...rows[index],
+        ...fieldUpdates,
+        status: target,
+        pending: target !== lastStatus,
+        abnormal: NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb)),
+      }
+      const next = [...rows]
+      next[index] = updated
+      return { rows: next, result: { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` } }
+    })
+  } catch {
+    return { ok: false, message: `${meta.entity}保存失败，本次${action}已整体回退` }
   }
-  const next = [...rows]
-  next[index] = updated
-  saveRows(key, next)
-  return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
 }
 
 export function resetModule(key: string): PageResult {

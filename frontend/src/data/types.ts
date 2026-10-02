@@ -17,6 +17,8 @@ export type ModuleMeta = {
   statuses: string[]
   actions: string[]
   actionTargets: Record<string, string>
+  // 动作落库时要一起写的业务字段；值填 "$today" 表示取当天日期，其余按字面量写入。
+  actionEffects?: Record<string, Record<string, string>>
   metrics: string[]
 }
 
